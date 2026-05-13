@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+scikit-learn
+pandas
+numpy
+joblib
+statsmodels
+firebase-admin
+pydantic
+python-multipart
+httpx
+python-dotenv
+gunicorn
+pytest
