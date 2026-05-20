@@ -1,12 +1,14 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 from .ml_model import PredictionRequest, get_top_crops, get_crop_prediction, explanations
 from pydantic import BaseModel
 from pathlib import Path
 from dotenv import load_dotenv
 from .openai_client import chat_with_openai, OpenAIError
 import time
-from .forecast_model import build_forecast, ensure_models
+from .forecast_model import build_forecast, ensure_models, _get_models
 from .soil_mapping import detect_soil_zone, list_soil_zones, get_sub_county_profile, get_crop_catalog
 from datetime import datetime
 from functools import lru_cache
@@ -17,6 +19,7 @@ load_dotenv(ENV_PATH)
 
 app = FastAPI(title="Luwero Crop Prediction API")
 
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,6 +27,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def _startup():
+    ensure_models()
+    try:
+        _get_models()
+    except Exception:
+        pass
+
+@app.get("/ping")
+async def ping():
+    return {"status": "ok"}
 
 @app.post("/predict")
 async def predict_crop(request: PredictionRequest):
@@ -151,12 +167,16 @@ async def detect_soil(request: SoilDetectionRequest):
 
 @app.get("/soil-zones")
 async def soil_zones():
-    return {"soil_zones": list_soil_zones()}
+    response = JSONResponse(content={"soil_zones": list_soil_zones()})
+    response.headers["Cache-Control"] = "public, max-age=3600"
+    return response
 
 
 @app.get("/crop-catalog")
 async def crop_catalog():
-    return get_crop_catalog()
+    response = JSONResponse(content=get_crop_catalog())
+    response.headers["Cache-Control"] = "public, max-age=86400"
+    return response
 
 
 @app.post("/predict/sub-county")
@@ -182,6 +202,11 @@ async def chat(request: ChatRequest, http_request: Request):
             raise HTTPException(status_code=429, detail="Too many requests. Please wait a few seconds.")
         recent.append(now)
         _RATE_LIMIT[client_ip] = recent
+        if len(_RATE_LIMIT) > 500:
+            cutoff = now - _RATE_LIMIT_WINDOW
+            stale = [ip for ip, ts_list in _RATE_LIMIT.items() if all(t < cutoff for t in ts_list)]
+            for ip in stale:
+                del _RATE_LIMIT[ip]
         cache_key = f"{client_ip}:{request.message.strip().lower()}"
         answer = await chat_with_openai(request.message, cache_key=cache_key)
         return {"answer": answer}
